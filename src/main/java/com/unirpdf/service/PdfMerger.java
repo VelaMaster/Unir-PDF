@@ -4,16 +4,19 @@ import com.unirpdf.model.PdfFile;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.multipdf.PDFMergerUtility;
 import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.function.BiConsumer;
 
 /**
  * Une varios PDFs en un único PDF respetando el orden recibido.
+ * Aplica las rotaciones por página configuradas por el usuario.
  * Reporta progreso (archivo actual / total).
  */
 public class PdfMerger {
@@ -44,7 +47,6 @@ public class PdfMerger {
 
         LOGGER.info("Iniciando unión de {} PDFs en {}", sources.size(), output.getAbsolutePath());
 
-        // Usamos PDDocument destino y añadimos páginas para reportar progreso por archivo
         try (PDDocument target = new PDDocument()) {
             PDFMergerUtility util = new PDFMergerUtility();
             int total = sources.size();
@@ -59,7 +61,21 @@ public class PdfMerger {
                     continue;
                 }
 
+                Map<Integer, Integer> rotations = src.getPageRotations();
                 try (PDDocument doc = Loader.loadPDF(srcFile)) {
+                    // Aplicar rotaciones del usuario antes de combinar.
+                    if (rotations != null && !rotations.isEmpty()) {
+                        int n = doc.getNumberOfPages();
+                        for (Map.Entry<Integer, Integer> e : rotations.entrySet()) {
+                            int idx = e.getKey();
+                            int extra = e.getValue();
+                            if (idx < 0 || idx >= n || extra == 0) continue;
+                            PDPage page = doc.getPage(idx);
+                            int current = page.getRotation();
+                            int combined = ((current + extra) % 360 + 360) % 360;
+                            page.setRotation(combined);
+                        }
+                    }
                     util.appendDocument(target, doc);
                 } catch (IOException ex) {
                     LOGGER.error("Error añadiendo PDF {}: {}", srcFile, ex.getMessage());

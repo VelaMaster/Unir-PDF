@@ -45,6 +45,29 @@ public class PdfTableModel extends AbstractTableModel {
         notifySelection();
     }
 
+    /** Añade los PDFs evitando duplicados (por ruta absoluta). Devuelve cuántos se añadieron. */
+    public int addAll(List<PdfFile> pdfs) {
+        if (pdfs == null || pdfs.isEmpty()) return 0;
+        int added = 0;
+        for (PdfFile p : pdfs) {
+            if (!data.contains(p)) {
+                data.add(p);
+                added++;
+            }
+        }
+        if (added > 0) {
+            fireTableDataChanged();
+            notifySelection();
+        }
+        return added;
+    }
+
+    public void clear() {
+        data.clear();
+        fireTableDataChanged();
+        notifySelection();
+    }
+
     public PdfFile getAt(int row) {
         return data.get(row);
     }

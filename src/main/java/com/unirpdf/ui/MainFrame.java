@@ -12,15 +12,25 @@ import javax.swing.*;
 import javax.swing.filechooser.FileNameExtensionFilter;
 import javax.swing.table.TableColumnModel;
 import javax.swing.table.TableRowSorter;
+import javax.swing.tree.DefaultMutableTreeNode;
+import javax.swing.tree.TreeSelectionModel;
 import java.awt.*;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.io.File;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Ventana principal de la aplicación Unir PDF.
+ *
+ * <p>Soporta múltiples ubicaciones: el usuario puede añadir varias carpetas
+ * raíz y archivos PDF sueltos desde cualquier parte del sistema. Un árbol a
+ * la izquierda permite navegar las carpetas y filtrar la tabla por
+ * ubicación. Las selecciones (checkbox) se mantienen al cambiar de carpeta.
  */
 public class MainFrame extends JFrame {
 
@@ -33,10 +43,13 @@ public class MainFrame extends JFrame {
     // Modelos
     private final PdfTableModel tableModel = new PdfTableModel();
     private final SelectedListModel selectedModel = new SelectedListModel();
+    private final FolderTreeModel folderTreeModel = new FolderTreeModel();
+    private final Set<File> roots = new LinkedHashSet<>();
     private TableRowSorter<PdfTableModel> sorter;
 
     // Componentes UI
     private JTable table;
+    private JTree folderTree;
     private JList<PdfFile> selectedList;
     private PreviewPanel previewPanel;
     private JTextField filterField;
@@ -44,10 +57,13 @@ public class MainFrame extends JFrame {
     private JLabel statusLabel;
     private JProgressBar progressBar;
 
+    // Filtros activos (texto + carpeta seleccionada en el árbol)
+    private String folderFilterPrefix; // null = sin filtro de carpeta
+
     public MainFrame() {
         super("Unir PDF — Combinar PDFs de múltiples carpetas");
         setDefaultCloseOperation(EXIT_ON_CLOSE);
-        setSize(1280, 800);
+        setSize(1400, 820);
         setLocationRelativeTo(null);
 
         buildUI();
@@ -69,18 +85,29 @@ public class MainFrame extends JFrame {
         JPanel top = new JPanel(new BorderLayout(8, 8));
         top.setBorder(BorderFactory.createEmptyBorder(10, 12, 6, 12));
 
-        // Línea 1: selección de carpeta
+        // Línea 1: ubicaciones
         JPanel folderRow = new JPanel(new BorderLayout(8, 0));
-        JButton chooseBtn = new JButton("📁 Seleccionar carpeta raíz...");
-        chooseBtn.addActionListener(e -> onChooseRoot());
-        rootLabel = new JLabel("Carpeta: (ninguna)");
+
+        JPanel leftBtns = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        JButton addFolderBtn = new JButton("📁+ Agregar carpeta...");
+        JButton addFilesBtn = new JButton("📄+ Agregar PDFs...");
+        JButton clearBtn = new JButton("🗑 Limpiar todo");
+        addFolderBtn.addActionListener(e -> onAddFolder());
+        addFilesBtn.addActionListener(e -> onAddFiles());
+        clearBtn.addActionListener(e -> onClearAll());
+        leftBtns.add(addFolderBtn);
+        leftBtns.add(addFilesBtn);
+        leftBtns.add(clearBtn);
+
+        rootLabel = new JLabel("Sin ubicaciones añadidas.");
         rootLabel.setForeground(Color.DARK_GRAY);
+        rootLabel.setBorder(BorderFactory.createEmptyBorder(0, 8, 0, 8));
 
         JButton mergeBtn = new JButton("✔ Unir PDFs seleccionados");
         mergeBtn.setFont(mergeBtn.getFont().deriveFont(Font.BOLD));
         mergeBtn.addActionListener(e -> onMerge());
 
-        folderRow.add(chooseBtn, BorderLayout.WEST);
+        folderRow.add(leftBtns, BorderLayout.WEST);
         folderRow.add(rootLabel, BorderLayout.CENTER);
         folderRow.add(mergeBtn, BorderLayout.EAST);
 
@@ -116,10 +143,21 @@ public class MainFrame extends JFrame {
     }
 
     // ------------------------------------------------------------------
-    // Centro: tabla + vista previa + lista de orden
+    // Centro: árbol | tabla | (vista previa + orden)
     // ------------------------------------------------------------------
     private JComponent buildCenter() {
-        // Tabla
+        // ----- Árbol de carpetas -----
+        folderTree = new JTree(folderTreeModel);
+        folderTree.getSelectionModel().setSelectionMode(TreeSelectionModel.SINGLE_TREE_SELECTION);
+        folderTree.setRootVisible(true);
+        folderTree.setShowsRootHandles(true);
+        folderTree.addTreeSelectionListener(e -> onTreeSelection());
+
+        JScrollPane treeScroll = new JScrollPane(folderTree);
+        treeScroll.setBorder(BorderFactory.createTitledBorder("Ubicaciones"));
+        treeScroll.setPreferredSize(new Dimension(240, 100));
+
+        // ----- Tabla -----
         table = new JTable(tableModel);
         table.setRowHeight(26);
         table.setAutoCreateRowSorter(false);
@@ -128,11 +166,11 @@ public class MainFrame extends JFrame {
         TableColumnModel cm = table.getColumnModel();
         cm.getColumn(PdfTableModel.COL_SELECTED).setMaxWidth(40);
         cm.getColumn(PdfTableModel.COL_SELECTED).setMinWidth(40);
-        cm.getColumn(PdfTableModel.COL_NAME).setPreferredWidth(240);
-        cm.getColumn(PdfTableModel.COL_FOLDER).setPreferredWidth(160);
-        cm.getColumn(PdfTableModel.COL_PATH).setPreferredWidth(360);
-        cm.getColumn(PdfTableModel.COL_SIZE).setPreferredWidth(80);
-        cm.getColumn(PdfTableModel.COL_DATE).setPreferredWidth(140);
+        cm.getColumn(PdfTableModel.COL_NAME).setPreferredWidth(220);
+        cm.getColumn(PdfTableModel.COL_FOLDER).setPreferredWidth(140);
+        cm.getColumn(PdfTableModel.COL_PATH).setPreferredWidth(320);
+        cm.getColumn(PdfTableModel.COL_SIZE).setPreferredWidth(70);
+        cm.getColumn(PdfTableModel.COL_DATE).setPreferredWidth(130);
 
         // Click en fila => preview
         table.getSelectionModel().addListSelectionListener(e -> {
@@ -153,10 +191,16 @@ public class MainFrame extends JFrame {
         JScrollPane tableScroll = new JScrollPane(table);
         tableScroll.setBorder(BorderFactory.createTitledBorder("PDFs encontrados"));
 
-        // Vista previa
+        // Split izquierdo: árbol | tabla
+        JSplitPane leftSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
+                treeScroll, tableScroll);
+        leftSplit.setResizeWeight(0.22);
+        leftSplit.setBorder(null);
+
+        // ----- Vista previa -----
         previewPanel = new PreviewPanel();
 
-        // Lista de orden (seleccionados)
+        // ----- Lista de orden -----
         selectedList = new JList<>(selectedModel);
         selectedList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         selectedList.setDragEnabled(true);
@@ -186,7 +230,7 @@ public class MainFrame extends JFrame {
         JButton upBtn = new JButton("▲ Subir");
         JButton downBtn = new JButton("▼ Bajar");
         JButton removeBtn = new JButton("✕ Quitar");
-        JButton clearBtn = new JButton("Vaciar");
+        JButton clearListBtn = new JButton("Vaciar");
         upBtn.addActionListener(e -> {
             int i = selectedList.getSelectedIndex();
             if (i > 0) { selectedModel.moveUp(i); selectedList.setSelectedIndex(i - 1); }
@@ -207,11 +251,11 @@ public class MainFrame extends JFrame {
                 updateCounters();
             }
         });
-        clearBtn.addActionListener(e -> tableModel.selectAll(false));
+        clearListBtn.addActionListener(e -> tableModel.selectAll(false));
         orderButtons.add(upBtn);
         orderButtons.add(downBtn);
         orderButtons.add(removeBtn);
-        orderButtons.add(clearBtn);
+        orderButtons.add(clearListBtn);
 
         JPanel orderRight = new JPanel(new BorderLayout(4, 4));
         orderRight.add(orderPanel, BorderLayout.CENTER);
@@ -223,13 +267,13 @@ public class MainFrame extends JFrame {
         // Split derecho: preview + orden
         JSplitPane rightSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT,
                 previewPanel, orderRight);
-        rightSplit.setResizeWeight(0.5);
+        rightSplit.setResizeWeight(0.55);
         rightSplit.setBorder(null);
 
-        // Split principal: tabla | (preview+orden)
+        // Split principal: (árbol|tabla) | (preview+orden)
         JSplitPane mainSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
-                tableScroll, rightSplit);
-        mainSplit.setResizeWeight(0.6);
+                leftSplit, rightSplit);
+        mainSplit.setResizeWeight(0.65);
         mainSplit.setBorder(BorderFactory.createEmptyBorder(0, 12, 0, 12));
         return mainSplit;
     }
@@ -253,22 +297,33 @@ public class MainFrame extends JFrame {
     }
 
     // ------------------------------------------------------------------
-    // Acciones
+    // Acciones de ubicaciones
     // ------------------------------------------------------------------
-    private void onChooseRoot() {
+    private void onAddFolder() {
         JFileChooser chooser = new JFileChooser(config.getLastRootFolder());
-        chooser.setDialogTitle("Selecciona la carpeta raíz");
+        chooser.setDialogTitle("Selecciona una carpeta para añadir");
         chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        chooser.setMultiSelectionEnabled(true);
         if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
 
-        File root = chooser.getSelectedFile();
-        config.setLastRootFolder(root.getAbsolutePath());
-        rootLabel.setText("Carpeta: " + root.getAbsolutePath());
-        scanFolder(root.toPath());
+        File[] selected = chooser.getSelectedFiles();
+        if (selected == null || selected.length == 0) {
+            File single = chooser.getSelectedFile();
+            if (single == null) return;
+            selected = new File[]{single};
+        }
+
+        config.setLastRootFolder(selected[0].getAbsolutePath());
+        for (File f : selected) addRoot(f.toPath());
     }
 
-    private void scanFolder(Path root) {
-        statusLabel.setText("Escaneando...");
+    private void addRoot(Path root) {
+        File rootFile = root.toFile();
+        if (!roots.add(rootFile)) {
+            UiUtils.error(this, "Esa carpeta ya está añadida:\n" + rootFile.getAbsolutePath());
+            return;
+        }
+        statusLabel.setText("Escaneando: " + rootFile.getAbsolutePath());
         progressBar.setIndeterminate(true);
         progressBar.setString("Buscando PDFs...");
 
@@ -282,9 +337,10 @@ public class MainFrame extends JFrame {
                 progressBar.setValue(0);
                 try {
                     List<PdfFile> pdfs = get();
-                    tableModel.setData(pdfs);
-                    statusLabel.setText("Escaneo completado.");
-                    LOGGER.info("Cargados {} PDFs en la tabla", pdfs.size());
+                    int added = tableModel.addAll(pdfs);
+                    LOGGER.info("Añadidos {} PDFs desde {}", added, rootFile);
+                    rebuildFolderTree();
+                    refreshRootLabel();
                     updateCounters();
                 } catch (Exception ex) {
                     LOGGER.error("Error escaneando carpeta", ex);
@@ -297,18 +353,119 @@ public class MainFrame extends JFrame {
         worker.execute();
     }
 
-    private void applyFilter() {
-        String text = filterField.getText().trim();
-        if (text.isEmpty()) {
-            sorter.setRowFilter(null);
-        } else {
-            // Filtra en nombre, carpeta y ruta (case-insensitive)
-            String regex = "(?i)" + java.util.regex.Pattern.quote(text);
-            sorter.setRowFilter(RowFilter.regexFilter(regex,
-                    PdfTableModel.COL_NAME,
-                    PdfTableModel.COL_FOLDER,
-                    PdfTableModel.COL_PATH));
+    private void onAddFiles() {
+        JFileChooser chooser = new JFileChooser(config.getLastRootFolder());
+        chooser.setDialogTitle("Selecciona uno o más PDFs para añadir");
+        chooser.setFileSelectionMode(JFileChooser.FILES_ONLY);
+        chooser.setMultiSelectionEnabled(true);
+        chooser.setFileFilter(new FileNameExtensionFilter("Archivos PDF (*.pdf)", "pdf"));
+        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
+
+        File[] files = chooser.getSelectedFiles();
+        if (files == null || files.length == 0) return;
+
+        List<PdfFile> toAdd = new ArrayList<>();
+        for (File f : files) {
+            if (f.isFile() && f.getName().toLowerCase().endsWith(".pdf")) {
+                toAdd.add(new PdfFile(f));
+            }
         }
+        int added = tableModel.addAll(toAdd);
+        if (added > 0) {
+            config.setLastRootFolder(files[0].getParentFile().getAbsolutePath());
+            rebuildFolderTree();
+            refreshRootLabel();
+            updateCounters();
+            statusLabel.setText("Añadidos " + added + " archivo(s).");
+        } else {
+            statusLabel.setText("No se añadió ningún archivo (¿ya estaban?).");
+        }
+    }
+
+    private void onClearAll() {
+        if (!UiUtils.confirm(this,
+                "¿Quitar todas las ubicaciones y la lista de PDFs?")) return;
+        roots.clear();
+        tableModel.clear();
+        selectedModel.clear();
+        folderFilterPrefix = null;
+        rebuildFolderTree();
+        refreshRootLabel();
+        previewPanel.showPreview(null);
+        updateCounters();
+    }
+
+    private void rebuildFolderTree() {
+        folderTreeModel.rebuild(new ArrayList<>(roots), tableModel.getAll());
+        // Expandir la raíz por defecto
+        folderTree.expandPath(folderTreeModel.rootPath());
+        applyFilter();
+    }
+
+    private void refreshRootLabel() {
+        int n = roots.size();
+        if (n == 0) {
+            rootLabel.setText("Sin ubicaciones añadidas.");
+        } else if (n == 1) {
+            rootLabel.setText("1 ubicación: " + roots.iterator().next().getAbsolutePath());
+        } else {
+            rootLabel.setText(n + " ubicaciones añadidas. Usa el árbol para navegar.");
+        }
+    }
+
+    private void onTreeSelection() {
+        DefaultMutableTreeNode node = (DefaultMutableTreeNode) folderTree.getLastSelectedPathComponent();
+        if (node == null) {
+            folderFilterPrefix = null;
+        } else {
+            Object userObj = node.getUserObject();
+            if (userObj instanceof FolderTreeModel.FolderNode) {
+                FolderTreeModel.FolderNode fn = (FolderTreeModel.FolderNode) userObj;
+                if (fn.getKind() == FolderTreeModel.FolderNode.Kind.ALL
+                        || fn.getKind() == FolderTreeModel.FolderNode.Kind.LOOSE
+                        || fn.getFolder() == null) {
+                    folderFilterPrefix = null;
+                } else {
+                    folderFilterPrefix = fn.getFolder().getAbsolutePath();
+                }
+            } else {
+                folderFilterPrefix = null;
+            }
+        }
+        applyFilter();
+    }
+
+    // ------------------------------------------------------------------
+    // Filtro combinado: texto + carpeta del árbol
+    // ------------------------------------------------------------------
+    private void applyFilter() {
+        final String text = filterField.getText().trim();
+        final String prefix = folderFilterPrefix;
+        if (text.isEmpty() && prefix == null) {
+            sorter.setRowFilter(null);
+            return;
+        }
+        sorter.setRowFilter(new RowFilter<PdfTableModel, Integer>() {
+            @Override
+            public boolean include(Entry<? extends PdfTableModel, ? extends Integer> entry) {
+                PdfFile p = entry.getModel().getAt(entry.getIdentifier());
+                if (prefix != null) {
+                    String abs = p.getAbsolutePath();
+                    if (!(abs.equals(prefix) || abs.startsWith(prefix + File.separator))) {
+                        return false;
+                    }
+                }
+                if (!text.isEmpty()) {
+                    String low = text.toLowerCase();
+                    if (!p.getName().toLowerCase().contains(low)
+                            && !p.getParentFolder().toLowerCase().contains(low)
+                            && !p.getAbsolutePath().toLowerCase().contains(low)) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        });
     }
 
     private void updateCounters() {
@@ -317,6 +474,9 @@ public class MainFrame extends JFrame {
         statusLabel.setText("Total: " + total + " PDFs   |   Seleccionados: " + sel);
     }
 
+    // ------------------------------------------------------------------
+    // Acción: Unir
+    // ------------------------------------------------------------------
     private void onMerge() {
         List<PdfFile> ordered = selectedModel.getAll();
         if (ordered.isEmpty()) {
@@ -324,7 +484,6 @@ public class MainFrame extends JFrame {
             return;
         }
 
-        // Diálogo de guardado, recordando la última ubicación y nombre
         JFileChooser chooser = new JFileChooser(config.getLastOutputDir());
         chooser.setDialogTitle("Guardar PDF unido como...");
         chooser.setFileFilter(new FileNameExtensionFilter("Archivos PDF (*.pdf)", "pdf"));
@@ -340,7 +499,6 @@ public class MainFrame extends JFrame {
             return;
         }
 
-        // Guardar preferencias
         config.setLastOutputDir(output.getParentFile().getAbsolutePath());
         config.setLastOutputName(output.getName());
 

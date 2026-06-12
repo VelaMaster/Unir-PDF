@@ -6,6 +6,8 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -24,6 +26,13 @@ public class PdfFile {
     private final long sizeBytes;
     private final long lastModifiedMillis;
     private boolean selected;
+
+    /**
+     * Rotaciones adicionales por página (índice 0-based -> grados {0,90,180,270}).
+     * Esta rotación se suma a la del documento original al renderizar la previa
+     * y al unir el PDF final.
+     */
+    private final Map<Integer, Integer> pageRotations = new HashMap<>();
 
     public PdfFile(File file) {
         this.file = Objects.requireNonNull(file, "file no puede ser null");
@@ -51,6 +60,40 @@ public class PdfFile {
     public boolean isSelected() { return selected; }
 
     public void setSelected(boolean selected) { this.selected = selected; }
+
+    /** Devuelve la rotación adicional aplicada por el usuario a la página (0/90/180/270). */
+    public int getPageRotation(int pageIndex) {
+        Integer v = pageRotations.get(pageIndex);
+        return v == null ? 0 : v;
+    }
+
+    /** Reemplaza la rotación adicional de una página. */
+    public void setPageRotation(int pageIndex, int degrees) {
+        int norm = ((degrees % 360) + 360) % 360;
+        if (norm == 0) {
+            pageRotations.remove(pageIndex);
+        } else {
+            pageRotations.put(pageIndex, norm);
+        }
+    }
+
+    /** Rota una página 90 grados en sentido horario y devuelve la nueva rotación. */
+    public int rotatePageClockwise(int pageIndex) {
+        int next = (getPageRotation(pageIndex) + 90) % 360;
+        setPageRotation(pageIndex, next);
+        return next;
+    }
+
+    /** Rota una página 90 grados en sentido antihorario y devuelve la nueva rotación. */
+    public int rotatePageCounterClockwise(int pageIndex) {
+        int next = (getPageRotation(pageIndex) + 270) % 360;
+        setPageRotation(pageIndex, next);
+        return next;
+    }
+
+    public Map<Integer, Integer> getPageRotations() {
+        return pageRotations;
+    }
 
     /** Tamaño formateado en KB / MB. */
     public String getSizeFormatted() {
